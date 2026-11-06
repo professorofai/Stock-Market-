@@ -2,14 +2,14 @@
 
 Handles UI layout, sidebar controls, user input, metric display cards,
 technical indicator toggles, live auto-refresh with st.fragment,
-and interactive chart presentation.
-Does not contain direct data fetching, indicator computations, or business logic.
+multi-stock watchlist, normalized performance comparison, and correlation analysis.
+Does not contain direct API calls, indicator computations, or business logic.
 """
 
 from datetime import datetime, timezone
 import os
 import sys
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import pandas as pd
 import streamlit as st
@@ -25,7 +25,9 @@ from charts.plots import (  # noqa: E402
     build_sma_traces,
     build_vwap_trace,
     candlestick_with_volume,
+    correlation_heatmap,
     macd_chart,
+    normalized_comparison_chart,
     rsi_chart,
 )
 from config import (  # noqa: E402
@@ -37,10 +39,21 @@ from config import (  # noqa: E402
     MAX_REFRESH_SECONDS,
     MIN_REFRESH_SECONDS,
     PERIOD_OPTIONS,
+    RISK_FREE_RATE,
     VALID_INTERVALS_FOR_PERIOD,
 )
-from data.fetcher import fetch_stock_data, get_quote_info, validate_ticker  # noqa: E402
-from data.processor import clean_data  # noqa: E402
+from data.fetcher import (  # noqa: E402
+    fetch_multiple,
+    fetch_stock_data,
+    get_quote_info,
+    validate_ticker,
+)
+from data.processor import (  # noqa: E402
+    align_prices_on_common_dates,
+    calculate_risk_return_metrics,
+    clean_data,
+    normalize_prices,
+)
 from indicators.technical import compute_indicator_summary  # noqa: E402
 
 # Currency symbols lookup table
@@ -86,23 +99,10 @@ def render_live_dashboard(
     show_rsi: bool,
     show_macd: bool,
 ) -> None:
-    """Render the live section of the dashboard with partial rerun capabilities.
+    """Render the live single-stock section with partial rerun capabilities.
 
     Uses st.fragment so auto-refreshes re-render only the metrics, charts,
-    and summary table without causing full-page reloads or resetting sidebar widgets.
-
-    Args:
-        ticker: Selected stock symbol.
-        period: Time range.
-        interval: Bar interval.
-        live_mode: Whether auto-refresh is active.
-        refresh_seconds: Polling interval in seconds.
-        show_sma: Toggle for SMA overlay.
-        show_ema: Toggle for EMA overlay.
-        show_bb: Toggle for Bollinger Bands.
-        show_vwap: Toggle for VWAP.
-        show_rsi: Toggle for RSI subpanel.
-        show_macd: Toggle for MACD subpanel.
+    and summary table without full-page reloads.
     """
     effective_run_every: Optional[int] = refresh_seconds if live_mode else None
 
@@ -117,7 +117,6 @@ def render_live_dashboard(
             df = clean_data(raw_df)
             quote_info = get_quote_info(ticker)
 
-        # Handle empty dataset cleanly
         if df.empty:
             st.error(
                 f"⚠️ No market data could be loaded for **{ticker}** "
@@ -283,8 +282,187 @@ def render_live_dashboard(
     _fragment_content()
 
 
+def render_watchlist_tab(
+    tickers: List[str],
+    period: str,
+    interval: str,
+) -> None:
+    """Render the Watchlist tab with tabular metrics and sparklines.
+
+    Args:
+        tickers: Selected watchlist ticker symbols.
+        period: Historical lookback period.
+        interval: Bar interval.
+    """
+    st.subheader("👀 Watchlist Overview")
+
+    if not tickers:
+        st.info("Please select or add at least one ticker in the sidebar to populate your watchlist.")
+        return
+
+    with st.spinner("Fetching market quotes for watchlist..."):
+        data_dict = fetch_multiple(tickers, period=period, interval=interval)
+
+    valid_dict: Dict[str, pd.DataFrame] = {t: clean_data(df) for t, df in data_dict.items() if not df.empty}
+    failed_tickers = [t for t in tickers if t not in valid_dict]
+
+    if failed_tickers:
+        st.warning(f"⚠️ Could not retrieve market data for: {', '.join(failed_tickers)} (skipped)")
+
+    if not valid_dict:
+        st.error("No valid market data could be loaded for any selected ticker.")
+        return
+
+    rows: List[Dict[str, Any]] = []
+
+    for ticker, df in valid_dict.items():
+        info = get_quote_info(ticker)
+        curr_price = info.get("current_price")
+        if curr_price is None or pd.isna(curr_price):
+            curr_price = float(df["Close"].iloc[-1])
+
+        prev_close = info.get("previous_close")
+        if prev_close is None or pd.isna(prev_close):
+            prev_close = float(df["Close"].iloc[-2]) if len(df) >= 2 else curr_price
+
+        day_high = info.get("day_high")
+        if day_high is None or pd.isna(day_high):
+            day_high = float(df["High"].iloc[-1])
+
+        day_low = info.get("day_low")
+        if day_low is None or pd.isna(day_low):
+            day_low = float(df["Low"].iloc[-1])
+
+        volume = info.get("volume")
+        if volume is None or pd.isna(volume):
+            volume = int(df["Volume"].iloc[-1])
+
+        abs_change = curr_price - prev_close
+        pct_change = (abs_change / prev_close * 100.0) if prev_close else 0.0
+
+        currency = info.get("currency", "USD")
+        curr_sym = CURRENCY_SYMBOLS.get(currency, f"{currency} ")
+        company_name = info.get("company_name", ticker)
+
+        # Extract last 30 closes for sparkline trend
+        sparkline_data = df["Close"].dropna().tail(30).tolist()
+
+        rows.append(
+            {
+                "Ticker": ticker,
+                "Company": company_name,
+                "Price": f"{curr_sym}{curr_price:,.2f}",
+                "Change %": pct_change,
+                "Day High": f"{curr_sym}{day_high:,.2f}",
+                "Day Low": f"{curr_sym}{day_low:,.2f}",
+                "Volume": format_volume(int(volume)),
+                "Trend": sparkline_data,
+            }
+        )
+
+    watchlist_df = pd.DataFrame(rows)
+
+    # Apply color styling to Change %
+    styled_df = watchlist_df.style.map(
+        lambda val: f"color: {'#26a69a' if val >= 0 else '#ef5350'}; font-weight: 600;"
+        if isinstance(val, (int, float)) and not pd.isna(val)
+        else "",
+        subset=["Change %"],
+    )
+
+    st.dataframe(
+        styled_df,
+        column_config={
+            "Trend": st.column_config.LineChartColumn("Price Trend (Recent)", width="medium"),
+            "Change %": st.column_config.NumberColumn("Change %", format="%.2f%%"),
+        },
+        use_container_width=True,
+        hide_index=True,
+    )
+
+
+def render_compare_tab(
+    tickers: List[str],
+    period: str,
+    interval: str,
+) -> None:
+    """Render multi-stock normalized comparison, correlation heatmap, and risk metrics.
+
+    Args:
+        tickers: Selected comparison tickers.
+        period: Historical period.
+        interval: Bar interval.
+    """
+    st.subheader("⚖️ Multi-Stock Performance & Correlation")
+
+    if len(tickers) < 2:
+        st.info("ℹ️ Please select at least 2 tickers from the sidebar to generate comparative analysis.")
+        return
+
+    with st.spinner("Fetching and harmonizing multi-market comparison data..."):
+        data_dict = fetch_multiple(tickers, period=period, interval=interval)
+
+    valid_dict: Dict[str, pd.DataFrame] = {t: clean_data(df) for t, df in data_dict.items() if not df.empty}
+    failed_tickers = [t for t in tickers if t not in valid_dict]
+
+    if failed_tickers:
+        st.warning(f"⚠️ Could not load data for: {', '.join(failed_tickers)} (skipped)")
+
+    if len(valid_dict) < 2:
+        st.warning("At least 2 valid stocks with active market data are required for comparative charts.")
+        return
+
+    # 1. Normalized Performance Chart (rebased to 100)
+    norm_df = normalize_prices(valid_dict)
+    fig_norm = normalized_comparison_chart(norm_df)
+    st.plotly_chart(fig_norm, use_container_width=True)
+
+    # Notice regarding multi-market calendar alignment
+    st.caption(
+        "ℹ️ **Multi-market calendar alignment:** Stocks from different international exchanges "
+        "(e.g., US NYSE/NASDAQ and Indian NSE/BSE) are aligned on overlapping trading dates. "
+        "Missing exchange holiday sessions are forward-filled."
+    )
+
+    st.markdown("---")
+
+    # 2. Correlation Matrix Heatmap of Daily Returns
+    aligned_df = align_prices_on_common_dates(valid_dict, method="ffill")
+    daily_returns = aligned_df.pct_change().dropna()
+
+    if not daily_returns.empty and len(daily_returns.columns) >= 2:
+        corr_matrix = daily_returns.corr()
+        col_heat, col_risk = st.columns([1, 1])
+
+        with col_heat:
+            st.subheader("🔥 Returns Correlation")
+            fig_corr = correlation_heatmap(corr_matrix)
+            st.plotly_chart(fig_corr, use_container_width=True)
+
+        with col_risk:
+            st.subheader("📊 Risk & Return Metrics")
+            risk_df = calculate_risk_return_metrics(valid_dict, risk_free_rate=RISK_FREE_RATE)
+            st.dataframe(
+                risk_df,
+                column_config={
+                    "Total Return %": st.column_config.NumberColumn(format="%.2f%%"),
+                    "Annualized Volatility %": st.column_config.NumberColumn(format="%.2f%%"),
+                    "Max Drawdown %": st.column_config.NumberColumn(format="%.2f%%"),
+                    "Sharpe Ratio": st.column_config.NumberColumn(format="%.2f"),
+                },
+                use_container_width=True,
+                hide_index=True,
+            )
+            st.caption(
+                f"Risk-free rate assumed at **{RISK_FREE_RATE * 100:.1f}%** p.a. | "
+                "Drawdown measured peak-to-trough."
+            )
+    else:
+        st.info("Insufficient overlapping time-series data to compute cross-asset correlation.")
+
+
 def main() -> None:
-    """Render the main Streamlit stock market dashboard."""
+    """Render the main Streamlit stock market dashboard with multi-tab layout."""
     st.set_page_config(
         layout="wide",
         page_title="Stock Dashboard",
@@ -328,21 +506,7 @@ def main() -> None:
                     else:
                         st.sidebar.error(f"'{candidate}' could not be verified or has no data.")
 
-    # Ticker Selector
-    current_index = (
-        st.session_state.tickers.index(st.session_state.current_ticker)
-        if st.session_state.current_ticker in st.session_state.tickers
-        else 0
-    )
-    selected_ticker = st.sidebar.selectbox(
-        "Select Ticker",
-        options=st.session_state.tickers,
-        index=current_index,
-        key="ticker_selector",
-    )
-    st.session_state.current_ticker = selected_ticker
-
-    # Period Selector
+    # Timeframe Controls
     default_period_idx = (
         PERIOD_OPTIONS.index(DEFAULT_PERIOD) if DEFAULT_PERIOD in PERIOD_OPTIONS else 2
     )
@@ -353,7 +517,6 @@ def main() -> None:
         key="period_selector",
     )
 
-    # Dynamic Interval Selector (filtered by chosen period)
     valid_intervals = VALID_INTERVALS_FOR_PERIOD.get(selected_period, ["1d"])
     default_interval_idx = (
         valid_intervals.index(DEFAULT_INTERVAL)
@@ -367,9 +530,34 @@ def main() -> None:
         key="interval_selector",
     )
 
-    # Technical Indicators Toggles
+    # Multi-Stock Watchlist & Compare Selection
     st.sidebar.markdown("---")
-    st.sidebar.subheader("📈 Technical Indicators")
+    st.sidebar.subheader("📋 Watchlist & Compare")
+    default_watchlist = [t for t in DEFAULT_TICKERS[:4] if t in st.session_state.tickers]
+    watchlist_tickers = st.sidebar.multiselect(
+        "Select Watchlist Stocks",
+        options=st.session_state.tickers,
+        default=default_watchlist,
+        key="watchlist_multiselect",
+        help="Choose 2 to 8 stocks to monitor in the Watchlist and Compare tabs.",
+    )
+
+    # Single Stock Specific Controls
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("📈 Single Stock Controls")
+    current_index = (
+        st.session_state.tickers.index(st.session_state.current_ticker)
+        if st.session_state.current_ticker in st.session_state.tickers
+        else 0
+    )
+    selected_ticker = st.sidebar.selectbox(
+        "Active Stock",
+        options=st.session_state.tickers,
+        index=current_index,
+        key="ticker_selector",
+    )
+    st.session_state.current_ticker = selected_ticker
+
     show_sma = st.sidebar.checkbox("SMA (20, 50)", value=False, key="toggle_sma", help="Simple Moving Averages (20 & 50 period)")
     show_ema = st.sidebar.checkbox("EMA (12, 26)", value=False, key="toggle_ema", help="Exponential Moving Averages (12 & 26 period)")
     show_bb = st.sidebar.checkbox("Bollinger Bands (20, 2σ)", value=False, key="toggle_bb", help="Bollinger Bands with 2 standard deviations")
@@ -377,7 +565,7 @@ def main() -> None:
     show_rsi = st.sidebar.checkbox("RSI (14)", value=False, key="toggle_rsi", help="Relative Strength Index oscillator")
     show_macd = st.sidebar.checkbox("MACD (12, 26, 9)", value=False, key="toggle_macd", help="Moving Average Convergence Divergence")
 
-    # Live Mode & Auto-Refresh Controls
+    # Live Mode Controls
     st.sidebar.markdown("---")
     st.sidebar.subheader("⏱ Live Refresh")
     live_mode = st.sidebar.toggle(
@@ -405,20 +593,39 @@ def main() -> None:
         st.cache_data.clear()
         st.rerun()
 
-    # --- Render Dashboard Fragment ---
-    render_live_dashboard(
-        ticker=selected_ticker,
-        period=selected_period,
-        interval=selected_interval,
-        live_mode=live_mode,
-        refresh_seconds=refresh_seconds,
-        show_sma=show_sma,
-        show_ema=show_ema,
-        show_bb=show_bb,
-        show_vwap=show_vwap,
-        show_rsi=show_rsi,
-        show_macd=show_macd,
+    # --- Main Area Tabs ---
+    tab_single, tab_watchlist, tab_compare = st.tabs(
+        ["📈 Single Stock", "👀 Watchlist", "⚖️ Compare"]
     )
+
+    with tab_single:
+        render_live_dashboard(
+            ticker=selected_ticker,
+            period=selected_period,
+            interval=selected_interval,
+            live_mode=live_mode,
+            refresh_seconds=refresh_seconds,
+            show_sma=show_sma,
+            show_ema=show_ema,
+            show_bb=show_bb,
+            show_vwap=show_vwap,
+            show_rsi=show_rsi,
+            show_macd=show_macd,
+        )
+
+    with tab_watchlist:
+        render_watchlist_tab(
+            tickers=watchlist_tickers,
+            period=selected_period,
+            interval=selected_interval,
+        )
+
+    with tab_compare:
+        render_compare_tab(
+            tickers=watchlist_tickers,
+            period=selected_period,
+            interval=selected_interval,
+        )
 
 
 if __name__ == "__main__":

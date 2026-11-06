@@ -62,6 +62,10 @@ MACD_FAST: int = 12
 MACD_SLOW: int = 26
 MACD_SIGNAL: int = 9
 
+# Risk and performance analysis parameters
+RISK_FREE_RATE: float = 0.05
+TRADING_DAYS_PER_YEAR: int = 252
+
 # Chart styling configurations
 DEFAULT_PERIOD: str = "1mo"
 DEFAULT_INTERVAL: str = "1d"

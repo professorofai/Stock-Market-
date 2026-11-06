@@ -570,6 +570,152 @@ def macd_chart(
     return fig
 
 
+def normalized_comparison_chart(norm_df: pd.DataFrame) -> go.Figure:
+    """Build a multi-ticker normalized performance line chart rebased to 100.
+
+    Args:
+        norm_df: DataFrame where each column is a ticker and values are rebased to 100.
+
+    Returns:
+        Plotly Figure with normalized comparison curves and a 100-baseline reference line.
+    """
+    fig = go.Figure()
+
+    if norm_df is None or norm_df.empty:
+        fig.update_layout(
+            template=PLOT_TEMPLATE,
+            height=480,
+            annotations=[dict(text="No comparison data available", showarrow=False, font=dict(color="#888", size=14))],
+        )
+        return fig
+
+    palette = [
+        "#29B6F6",  # Light Blue
+        "#66BB6A",  # Green
+        "#FFA726",  # Orange
+        "#AB47BC",  # Purple
+        "#EC407A",  # Pink
+        "#26A69A",  # Teal
+        "#FF7043",  # Deep Orange
+        "#FFEE58",  # Yellow
+    ]
+
+    # Baseline reference at 100.0
+    fig.add_hline(
+        y=100.0,
+        line_dash="dash",
+        line_color="rgba(255, 255, 255, 0.35)",
+        annotation_text="Base 100",
+        annotation_position="bottom right",
+    )
+
+    for i, ticker in enumerate(norm_df.columns):
+        series = norm_df[ticker].dropna()
+        if series.empty:
+            continue
+        line_color = palette[i % len(palette)]
+        fig.add_trace(
+            go.Scatter(
+                x=series.index,
+                y=series,
+                mode="lines",
+                name=str(ticker),
+                line=dict(color=line_color, width=2.0),
+            )
+        )
+
+    fig.update_layout(
+        template=PLOT_TEMPLATE,
+        hovermode="x unified",
+        margin=dict(l=50, r=40, t=50, b=40),
+        height=480,
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="right",
+            x=1,
+        ),
+        title=dict(
+            text="<b>Multi-Stock Normalized Performance</b> (Rebased to 100)",
+            x=0.02,
+            xanchor="left",
+        ),
+        yaxis=dict(
+            title="Normalized Price (Base = 100)",
+            showgrid=True,
+            gridcolor="#2A2E39",
+        ),
+        xaxis=dict(
+            showgrid=True,
+            gridcolor="#2A2E39",
+        ),
+    )
+    return fig
+
+
+def correlation_heatmap(corr_matrix: pd.DataFrame) -> go.Figure:
+    """Build an annotated correlation matrix heatmap of asset daily returns.
+
+    Args:
+        corr_matrix: Square correlation matrix DataFrame.
+
+    Returns:
+        Plotly Figure showing the correlation heatmap.
+    """
+    fig = go.Figure()
+
+    if corr_matrix is None or corr_matrix.empty:
+        fig.update_layout(
+            template=PLOT_TEMPLATE,
+            height=420,
+            annotations=[dict(text="No correlation data available", showarrow=False, font=dict(color="#888", size=14))],
+        )
+        return fig
+
+    # Rounded formatted text annotations
+    text_matrix = [[f"{val:.2f}" if not pd.isna(val) else "N/A" for val in row] for row in corr_matrix.values]
+
+    # Diverging colorscale from -1 (red) to 0 (dark neutral) to 1 (green)
+    diverging_scale = [
+        [0.0, "#EF5350"],   # -1: Strong negative correlation
+        [0.5, "#1E222D"],   #  0: Uncorrelated
+        [1.0, "#26A69A"],   # +1: Strong positive correlation
+    ]
+
+    fig.add_trace(
+        go.Heatmap(
+            z=corr_matrix.values,
+            x=corr_matrix.columns.tolist(),
+            y=corr_matrix.index.tolist(),
+            text=text_matrix,
+            texttemplate="%{text}",
+            textfont=dict(size=12, color="#FFFFFF"),
+            colorscale=diverging_scale,
+            zmin=-1.0,
+            zmax=1.0,
+            colorbar=dict(
+                title=dict(text="Correlation", side="right"),
+                tickvals=[-1.0, -0.5, 0.0, 0.5, 1.0],
+                len=0.85,
+            ),
+        )
+    )
+
+    fig.update_layout(
+        template=PLOT_TEMPLATE,
+        margin=dict(l=60, r=40, t=50, b=40),
+        height=420,
+        title=dict(
+            text="<b>Daily Returns Correlation Matrix</b>",
+            x=0.02,
+            xanchor="left",
+        ),
+        xaxis=dict(tickangle=-25),
+    )
+    return fig
+
+
 if __name__ == "__main__":
     dates = pd.date_range("2026-01-01", periods=60, freq="B", tz="UTC")
     sample_df = pd.DataFrame(
