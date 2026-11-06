@@ -2,7 +2,8 @@
 
 Handles UI layout, sidebar controls, user input, metric display cards,
 technical indicator toggles, live auto-refresh with st.fragment,
-multi-stock watchlist, normalized performance comparison, and correlation analysis.
+multi-stock watchlist, normalized performance comparison, correlation analysis,
+and data/chart exports.
 Does not contain direct API calls, indicator computations, or business logic.
 """
 
@@ -43,6 +44,7 @@ from config import (  # noqa: E402
     VALID_INTERVALS_FOR_PERIOD,
 )
 from data.fetcher import (  # noqa: E402
+    DataFetchError,
     fetch_multiple,
     fetch_stock_data,
     get_quote_info,
@@ -54,7 +56,15 @@ from data.processor import (  # noqa: E402
     clean_data,
     normalize_prices,
 )
-from indicators.technical import compute_indicator_summary  # noqa: E402
+from indicators.technical import (  # noqa: E402
+    bollinger_bands,
+    compute_indicator_summary,
+    ema,
+    macd,
+    rsi,
+    sma,
+    vwap,
+)
 
 # Currency symbols lookup table
 CURRENCY_SYMBOLS: Dict[str, str] = {
@@ -108,14 +118,22 @@ def render_live_dashboard(
 
     @st.fragment(run_every=effective_run_every)
     def _fragment_content() -> None:
-        with st.spinner(f"Updating market data for {ticker}..."):
-            raw_df = fetch_stock_data(
-                ticker=ticker,
-                period=period,
-                interval=interval,
-            )
-            df = clean_data(raw_df)
-            quote_info = get_quote_info(ticker)
+        try:
+            with st.spinner(f"Updating market data for {ticker}..."):
+                raw_df = fetch_stock_data(
+                    ticker=ticker,
+                    period=period,
+                    interval=interval,
+                )
+                df = clean_data(raw_df)
+                quote_info = get_quote_info(ticker)
+        except DataFetchError as dfe:
+            st.error(f"⚠️ Network error while fetching data for **{ticker}**: {dfe}")
+            st.info("Please check your internet connection or try again shortly.")
+            return
+        except Exception as exc:
+            st.error(f"⚠️ An unexpected error occurred while loading **{ticker}**: {exc}")
+            return
 
         if df.empty:
             st.error(
@@ -172,7 +190,7 @@ def render_live_dashboard(
         last_bar_time = df.index[-1].strftime("%Y-%m-%d %H:%M %Z")
         st.caption(
             f"Currency: **{currency}** | Timeframe: **{period}** | Bar: **{interval}** | "
-            f"Latest Bar: **{last_bar_time}**"
+            f"Latest Bar: **{last_bar_time}** | Source: Yahoo Finance (~15m delay)"
         )
 
         # Derive metric card values
@@ -279,6 +297,74 @@ def render_live_dashboard(
             summary_df = pd.DataFrame(summary_data)
             st.dataframe(summary_df, use_container_width=True, hide_index=True)
 
+        # Export Section
+        st.markdown("---")
+        st.subheader("📥 Export Data & Interactive Charts")
+
+        # Compile comprehensive export dataset with indicators
+        export_df = df.copy()
+        export_df["SMA_20"] = sma(df["Close"], 20)
+        export_df["SMA_50"] = sma(df["Close"], 50)
+        export_df["EMA_12"] = ema(df["Close"], 12)
+        export_df["EMA_26"] = ema(df["Close"], 26)
+        bb_df = bollinger_bands(df["Close"], 20, 2.0)
+        export_df["BB_Upper"] = bb_df["Upper"]
+        export_df["BB_Middle"] = bb_df["Middle"]
+        export_df["BB_Lower"] = bb_df["Lower"]
+        export_df["VWAP"] = vwap(df)
+        export_df["RSI_14"] = rsi(df["Close"], 14)
+        macd_data = macd(df["Close"], 12, 26, 9)
+        export_df["MACD"] = macd_data["MACD"]
+        export_df["MACD_Signal"] = macd_data["Signal"]
+        export_df["MACD_Hist"] = macd_data["Histogram"]
+
+        csv_bytes = export_df.to_csv().encode("utf-8")
+        html_bytes = main_fig.to_html(include_plotlyjs="cdn").encode("utf-8")
+
+        col_d1, col_d2 = st.columns(2)
+        with col_d1:
+            st.download_button(
+                label="📥 Download Data + Indicators (CSV)",
+                data=csv_bytes,
+                file_name=f"{ticker}_{period}_{interval}_indicators.csv",
+                mime="text/csv",
+                use_container_width=True,
+                key="download_csv_btn",
+            )
+        with col_d2:
+            st.download_button(
+                label="📊 Download Interactive Chart (HTML)",
+                data=html_bytes,
+                file_name=f"{ticker}_{period}_{interval}_chart.html",
+                mime="text/html",
+                use_container_width=True,
+                key="download_html_btn",
+            )
+
+        # Educational & Methodology Expanders
+        st.markdown("---")
+        with st.expander("ℹ️ About This Data & Market Latency"):
+            st.markdown(
+                """
+                - **Data Source**: Market data retrieved via Yahoo Finance API (`yfinance`).
+                - **Feed Latency**: Real-time for major US equities; up to **15 minutes delayed** for certain global exchanges (e.g. NSE / BSE).
+                - **Adjusted Prices**: All OHLC values are split- and dividend-adjusted (`auto_adjust=True`) to maintain mathematical integrity across technical indicators.
+                - **Trading Calendars**: Multi-stock analyses harmonize differing regional trading calendars (e.g. US holidays vs. Indian market holidays) via forward-filling.
+                """
+            )
+
+        with st.expander("📚 Technical Indicator Explanations"):
+            st.markdown(
+                r"""
+                - **SMA (Simple Moving Average)**: The unweighted arithmetic mean over $k$ periods. Smoothes noise to reveal underlying trend.
+                - **EMA (Exponential Moving Average)**: Applies exponentially decreasing weights to older data points, prioritizing recent price discovery.
+                - **Bollinger Bands**: An envelope plotted at $\pm 2$ standard deviations around a 20-day SMA. Band contraction indicates consolidation; widening indicates surging volatility.
+                - **VWAP (Volume Weighted Average Price)**: Cumulative ratio of dollar volume to total share volume. Automatically resets daily on intraday timeframes to benchmark institutional execution quality.
+                - **RSI (Relative Strength Index)**: Momentum oscillator bounded from 0 to 100 with Wilder's exponential smoothing. Readouts above 70 indicate overbought conditions; below 30 indicate oversold conditions.
+                - **MACD (Moving Average Convergence Divergence)**: Difference between the 12-day and 26-day EMAs, with a 9-day EMA signal trigger line and momentum histogram.
+                """
+            )
+
     _fragment_content()
 
 
@@ -287,21 +373,19 @@ def render_watchlist_tab(
     period: str,
     interval: str,
 ) -> None:
-    """Render the Watchlist tab with tabular metrics and sparklines.
-
-    Args:
-        tickers: Selected watchlist ticker symbols.
-        period: Historical lookback period.
-        interval: Bar interval.
-    """
+    """Render the Watchlist tab with tabular metrics, sparklines, and export."""
     st.subheader("👀 Watchlist Overview")
 
     if not tickers:
         st.info("Please select or add at least one ticker in the sidebar to populate your watchlist.")
         return
 
-    with st.spinner("Fetching market quotes for watchlist..."):
-        data_dict = fetch_multiple(tickers, period=period, interval=interval)
+    try:
+        with st.spinner("Fetching market quotes for watchlist..."):
+            data_dict = fetch_multiple(tickers, period=period, interval=interval)
+    except Exception as exc:
+        st.error(f"⚠️ Error loading watchlist: {exc}")
+        return
 
     valid_dict: Dict[str, pd.DataFrame] = {t: clean_data(df) for t, df in data_dict.items() if not df.empty}
     failed_tickers = [t for t in tickers if t not in valid_dict]
@@ -362,7 +446,6 @@ def render_watchlist_tab(
 
     watchlist_df = pd.DataFrame(rows)
 
-    # Apply color styling to Change %
     styled_df = watchlist_df.style.map(
         lambda val: f"color: {'#26a69a' if val >= 0 else '#ef5350'}; font-weight: 600;"
         if isinstance(val, (int, float)) and not pd.isna(val)
@@ -380,27 +463,36 @@ def render_watchlist_tab(
         hide_index=True,
     )
 
+    # Watchlist Export
+    st.markdown("---")
+    export_watchlist = watchlist_df.drop(columns=["Trend"])
+    st.download_button(
+        label="📥 Download Watchlist Summary (CSV)",
+        data=export_watchlist.to_csv(index=False).encode("utf-8"),
+        file_name="watchlist_summary.csv",
+        mime="text/csv",
+        key="download_watchlist_csv",
+    )
+
 
 def render_compare_tab(
     tickers: List[str],
     period: str,
     interval: str,
 ) -> None:
-    """Render multi-stock normalized comparison, correlation heatmap, and risk metrics.
-
-    Args:
-        tickers: Selected comparison tickers.
-        period: Historical period.
-        interval: Bar interval.
-    """
+    """Render multi-stock normalized comparison, correlation heatmap, and risk metrics."""
     st.subheader("⚖️ Multi-Stock Performance & Correlation")
 
     if len(tickers) < 2:
         st.info("ℹ️ Please select at least 2 tickers from the sidebar to generate comparative analysis.")
         return
 
-    with st.spinner("Fetching and harmonizing multi-market comparison data..."):
-        data_dict = fetch_multiple(tickers, period=period, interval=interval)
+    try:
+        with st.spinner("Fetching and harmonizing multi-market comparison data..."):
+            data_dict = fetch_multiple(tickers, period=period, interval=interval)
+    except Exception as exc:
+        st.error(f"⚠️ Error loading comparative data: {exc}")
+        return
 
     valid_dict: Dict[str, pd.DataFrame] = {t: clean_data(df) for t, df in data_dict.items() if not df.empty}
     failed_tickers = [t for t in tickers if t not in valid_dict]
@@ -417,7 +509,6 @@ def render_compare_tab(
     fig_norm = normalized_comparison_chart(norm_df)
     st.plotly_chart(fig_norm, use_container_width=True)
 
-    # Notice regarding multi-market calendar alignment
     st.caption(
         "ℹ️ **Multi-market calendar alignment:** Stocks from different international exchanges "
         "(e.g., US NYSE/NASDAQ and Indian NSE/BSE) are aligned on overlapping trading dates. "
@@ -457,6 +548,13 @@ def render_compare_tab(
                 f"Risk-free rate assumed at **{RISK_FREE_RATE * 100:.1f}%** p.a. | "
                 "Drawdown measured peak-to-trough."
             )
+            st.download_button(
+                label="📥 Export Risk Metrics (CSV)",
+                data=risk_df.to_csv(index=False).encode("utf-8"),
+                file_name="risk_return_comparison.csv",
+                mime="text/csv",
+                key="download_risk_metrics_csv",
+            )
     else:
         st.info("Insufficient overlapping time-series data to compute cross-asset correlation.")
 
@@ -467,6 +565,33 @@ def main() -> None:
         layout="wide",
         page_title="Stock Dashboard",
         page_icon="📈",
+    )
+
+    # Minimalist Custom CSS styling for metric cards and polish
+    st.markdown(
+        """
+        <style>
+        div[data-testid="stMetric"] {
+            background-color: #1a1c24;
+            border: 1px solid #2a2e39;
+            padding: 12px 16px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.25);
+        }
+        div[data-testid="stMetric"]:hover {
+            border-color: #26a69a;
+            transition: border-color 0.2s ease-in-out;
+        }
+        div[data-testid="stMetricLabel"] p {
+            font-size: 0.85rem;
+            color: #9e9e9e;
+        }
+        div[data-testid="stMetricValue"] {
+            font-weight: 700;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
     )
 
     # Initialize ticker list and state defaults
@@ -626,6 +751,13 @@ def main() -> None:
             period=selected_period,
             interval=selected_interval,
         )
+
+    # Footer Disclaimer
+    st.markdown("---")
+    st.caption(
+        "⚠️ **Disclaimer:** Market data is provided by Yahoo Finance and may be delayed up to 15 minutes for certain exchanges. "
+        "All calculations, technical indicators, and visualizations are for educational and informational purposes only and do not constitute financial, investment, or trading advice."
+    )
 
 
 if __name__ == "__main__":

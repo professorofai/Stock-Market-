@@ -8,7 +8,7 @@ import logging
 import os
 import sys
 import time
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import pandas as pd
 import streamlit as st
@@ -28,7 +28,15 @@ from config import (  # noqa: E402
 )
 
 logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+
+
+class DataFetchError(Exception):
+    """Custom exception raised when market data retrieval fails."""
+
+    def __init__(self, message: str, ticker: Optional[str] = None) -> None:
+        super().__init__(message)
+        self.ticker = ticker
 
 
 @st.cache_data(ttl=CACHE_TTL_SECONDS)

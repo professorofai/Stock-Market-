@@ -6,10 +6,13 @@ Strictly zero reliance on third-party technical analysis libraries ('ta' / 'pand
 All calculations are vectorized without row-iteration loops.
 """
 
+import logging
 from typing import Optional
 
 import numpy as np
 import pandas as pd
+
+logger = logging.getLogger(__name__)
 
 
 def sma(series: pd.Series, window: int) -> pd.Series:

@@ -10,7 +10,10 @@ ENV/
 .venv/
 
 # Streamlit
-.streamlit/
+.streamlit/*
+!.streamlit/config.toml
+stock-dashboard/.streamlit/*
+!stock-dashboard/.streamlit/config.toml
 
 # OS generated files
 .DS_Store
