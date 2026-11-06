@@ -31,7 +31,19 @@ VALID_INTERVALS_FOR_PERIOD: Dict[str, List[str]] = {
 
 # Dashboard refresh and data caching parameters (in seconds)
 DEFAULT_REFRESH_SECONDS: int = 30
-CACHE_TTL_SECONDS: int = 30
+MIN_REFRESH_SECONDS: int = 5
+MAX_REFRESH_SECONDS: int = 120
+CACHE_TTL_SECONDS: int = 5
+
+# Interval duration in seconds (for stale data & market closed detection)
+INTERVAL_SECONDS_MAP: Dict[str, int] = {
+    "1m": 60,
+    "5m": 300,
+    "15m": 900,
+    "30m": 1800,
+    "1h": 3600,
+    "1d": 86400,
+}
 
 # API retry parameters
 MAX_RETRIES: int = 3
