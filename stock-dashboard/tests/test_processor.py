@@ -161,3 +161,4 @@ def test_calculate_risk_return_metrics() -> None:
     assert set(metrics["Ticker"]) == {"STOCK_UP", "STOCK_DOWN"}
     assert "Total Return %" in metrics.columns
     assert "Max Drawdown %" in metrics.columns
+

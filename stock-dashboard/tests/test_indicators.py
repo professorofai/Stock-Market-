@@ -179,3 +179,4 @@ def test_compute_indicator_summary(synthetic_ohlcv: pd.DataFrame) -> None:
         assert "Indicator" in item
         assert "Current Value" in item
         assert "Interpretation" in item
+
