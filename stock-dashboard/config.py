@@ -49,3 +49,13 @@ BOLLINGER_STD: float = 2.0
 MACD_FAST: int = 12
 MACD_SLOW: int = 26
 MACD_SIGNAL: int = 9
+
+# Chart styling configurations
+DEFAULT_PERIOD: str = "1mo"
+DEFAULT_INTERVAL: str = "1d"
+CANDLE_UP_COLOR: str = "#26a69a"
+CANDLE_DOWN_COLOR: str = "#ef5350"
+VOLUME_UP_COLOR: str = "rgba(38, 166, 154, 0.7)"
+VOLUME_DOWN_COLOR: str = "rgba(239, 83, 80, 0.7)"
+PLOT_TEMPLATE: str = "plotly_dark"
+
