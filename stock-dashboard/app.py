@@ -1,13 +1,13 @@
 """Main Streamlit application entry point.
 
 Handles UI layout, sidebar controls, user input, metric display cards,
-and interactive chart presentation.
+technical indicator toggles, and interactive chart presentation.
 Does not contain direct data fetching, indicator computations, or business logic.
 """
 
 import os
 import sys
-from typing import Dict
+from typing import Dict, List
 
 import pandas as pd
 import streamlit as st
@@ -17,7 +17,15 @@ PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from charts.plots import candlestick_with_volume  # noqa: E402
+from charts.plots import (  # noqa: E402
+    build_bollinger_traces,
+    build_ema_traces,
+    build_sma_traces,
+    build_vwap_trace,
+    candlestick_with_volume,
+    macd_chart,
+    rsi_chart,
+)
 from config import (  # noqa: E402
     DEFAULT_INTERVAL,
     DEFAULT_PERIOD,
@@ -27,6 +35,7 @@ from config import (  # noqa: E402
 )
 from data.fetcher import fetch_stock_data, get_quote_info, validate_ticker  # noqa: E402
 from data.processor import clean_data  # noqa: E402
+from indicators.technical import compute_indicator_summary  # noqa: E402
 
 # Currency symbols lookup table
 CURRENCY_SYMBOLS: Dict[str, str] = {
@@ -136,6 +145,16 @@ def main() -> None:
         index=default_interval_idx,
     )
 
+    # Technical Indicators Toggles
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("📈 Technical Indicators")
+    show_sma = st.sidebar.checkbox("SMA (20, 50)", value=False, help="Simple Moving Averages (20 & 50 period)")
+    show_ema = st.sidebar.checkbox("EMA (12, 26)", value=False, help="Exponential Moving Averages (12 & 26 period)")
+    show_bb = st.sidebar.checkbox("Bollinger Bands (20, 2σ)", value=False, help="Bollinger Bands with 2 standard deviations")
+    show_vwap = st.sidebar.checkbox("VWAP", value=False, help="Volume Weighted Average Price (resets daily for intraday)")
+    show_rsi = st.sidebar.checkbox("RSI (14)", value=False, help="Relative Strength Index oscillator")
+    show_macd = st.sidebar.checkbox("MACD (12, 26, 9)", value=False, help="Moving Average Convergence Divergence")
+
     st.sidebar.markdown("---")
     if st.sidebar.button("🔄 Refresh Data", use_container_width=True):
         st.cache_data.clear()
@@ -229,9 +248,53 @@ def main() -> None:
 
     st.markdown("---")
 
-    # Interactive Candlestick and Volume Chart
-    fig = candlestick_with_volume(df=df, ticker=selected_ticker)
-    st.plotly_chart(fig, use_container_width=True)
+    # Build Technical Overlay Traces for Price Pane
+    overlay_traces: List[object] = []
+    data_points = len(df)
+
+    if show_sma:
+        if data_points < 20:
+            st.info(f"ℹ️ Notice: SMA requires at least 20 bars; dataset contains {data_points} bars.")
+        overlay_traces.extend(build_sma_traces(df["Close"]))
+
+    if show_ema:
+        if data_points < 12:
+            st.info(f"ℹ️ Notice: EMA requires at least 12 bars; dataset contains {data_points} bars.")
+        overlay_traces.extend(build_ema_traces(df["Close"]))
+
+    if show_bb:
+        if data_points < 20:
+            st.info(f"ℹ️ Notice: Bollinger Bands require at least 20 bars; dataset contains {data_points} bars.")
+        overlay_traces.extend(build_bollinger_traces(df["Close"]))
+
+    if show_vwap:
+        vwap_trace = build_vwap_trace(df)
+        if vwap_trace is not None:
+            overlay_traces.append(vwap_trace)
+
+    # Interactive Candlestick and Volume Chart with Overlays
+    main_fig = candlestick_with_volume(df=df, ticker=selected_ticker, overlay_traces=overlay_traces)
+    st.plotly_chart(main_fig, use_container_width=True)
+
+    # Separate RSI Panel (rendered only when toggled)
+    if show_rsi:
+        if data_points < 15:
+            st.info(f"ℹ️ Notice: RSI(14) requires at least 15 bars to compute. Current dataset has {data_points} bars.")
+        st.plotly_chart(rsi_chart(df, ticker=selected_ticker), use_container_width=True)
+
+    # Separate MACD Panel (rendered only when toggled)
+    if show_macd:
+        if data_points < 26:
+            st.info(f"ℹ️ Notice: MACD requires at least 26 bars for slow EMA. Current dataset has {data_points} bars.")
+        st.plotly_chart(macd_chart(df, ticker=selected_ticker), use_container_width=True)
+
+    # Indicator Summary Section
+    st.markdown("---")
+    st.subheader("📋 Technical Indicator Summary")
+    summary_data = compute_indicator_summary(df)
+    if summary_data:
+        summary_df = pd.DataFrame(summary_data)
+        st.dataframe(summary_df, use_container_width=True, hide_index=True)
 
 
 if __name__ == "__main__":
